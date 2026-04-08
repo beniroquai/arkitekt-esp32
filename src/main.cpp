@@ -308,6 +308,7 @@ void setup()
 
   // Initialize the manifest with requirements
   appManifest.addRequirement("rekuest", "live.arkitekt.rekuest", false);
+  appManifest.addDeviceId("esp32-001");
   // You can add more requirements or scopes here
   // appManifest.addScope("read:nodes");
   // appManifest.addRequirement("fluss", "live.arkitekt.fluss", true);

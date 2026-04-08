@@ -28,6 +28,7 @@ struct Manifest
 {
     String identifier;
     String version;
+    String device_id;
     String scopes[10]; // Fixed size array for scopes
     int scopeCount;
     Requirement requirements[5]; // Fixed size array for requirements
@@ -44,6 +45,11 @@ struct Manifest
         {
             scopes[scopeCount++] = scope;
         }
+    }
+
+    void addDeviceId(const String &deviceId)
+    {
+        device_id = deviceId;
     }
 
     void addRequirement(const Requirement &req)
@@ -63,6 +69,7 @@ struct Manifest
     {
         obj["identifier"] = identifier;
         obj["version"] = version;
+        obj["device_id"] = device_id;
 
         JsonArray scopesArray = obj["scopes"].to<JsonArray>();
         for (int i = 0; i < scopeCount; i++)
@@ -84,6 +91,7 @@ struct Manifest
         Serial.println("  Identifier: " + identifier);
         Serial.println("  Version: " + version);
         Serial.print("  Scopes: ");
+        Serial.print("Device ID: " + device_id);
         for (int i = 0; i < scopeCount; i++)
         {
             Serial.print(scopes[i]);
