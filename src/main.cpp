@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include "esp_wpa2.h"
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -21,6 +22,9 @@
 #define WIFI_PASSWORD_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a9"
 #define BASE_URL_UUID "beb5483e-36e1-4688-b7f5-ea07361b26aa"
 #define FAKTS_TOKEN_UUID "beb5483e-36e1-4688-b7f5-ea07361b26ab"
+#define WIFI_IDENTITY_UUID "beb5483e-36e1-4688-b7f5-ea07361b26ae"
+#define WIFI_ANONYMOUS_IDENTITY_UUID "beb5483e-36e1-4688-b7f5-ea07361b26af"
+#define WIFI_PEM_CERTIFICATE_UUID "beb5483e-36e1-4688-b7f5-ea07361b26b0"
 #define MANIFEST_UUID "beb5483e-36e1-4688-b7f5-ea07361b26ad"
 #define STATUS_UUID "beb5483e-36e1-4688-b7f5-ea07361b26ac"
 
@@ -53,6 +57,9 @@ bool oldDeviceConnected = false;
 
 String wifiSSID = "";
 String wifiPassword = "";
+String wifiIdentity = "";
+String wifiAnonIdentity = "";
+String wifiPemCertificate = "";
 String configBaseUrl = "";
 String configToken = "";
 bool hasNewConfig = false;
@@ -110,6 +117,60 @@ class WiFiPasswordCallbacks : public BLECharacteristicCallbacks
     else
     {
       Serial.println("[BLE] WARNING: Empty WiFi Password received");
+    }
+  }
+};
+
+class WiFiIdentityCallbacks : public BLECharacteristicCallbacks
+{
+  void onWrite(BLECharacteristic *pCharacteristic)
+  {
+    Serial.println("[BLE] WiFi Identity characteristic WRITE received");
+    std::string value = pCharacteristic->getValue();
+    if (value.length() > 0)
+    {
+      wifiIdentity = String(value.c_str());
+      Serial.println("[BLE] Received WiFi Identity: " + wifiIdentity);
+    }
+    else
+    {
+      Serial.println("[BLE] WARNING: Empty WiFi Identity received");
+    }
+  }
+};
+
+class WiFiAnonIdentityCallbacks : public BLECharacteristicCallbacks
+{
+  void onWrite(BLECharacteristic *pCharacteristic)
+  {
+    Serial.println("[BLE] WiFi Anonymous Identity characteristic WRITE received");
+    std::string value = pCharacteristic->getValue();
+    if (value.length() > 0)
+    {
+      wifiAnonIdentity = String(value.c_str());
+      Serial.println("[BLE] Received WiFi Anonymous Identity: " + wifiAnonIdentity);
+    }
+    else
+    {
+      Serial.println("[BLE] WARNING: Empty WiFi Anonymous Identity received");
+    }
+  }
+};
+
+class WiFiPemCertificateCallbacks : public BLECharacteristicCallbacks
+{
+  void onWrite(BLECharacteristic *pCharacteristic)
+  {
+    Serial.println("[BLE] WiFi PEM Certificate characteristic WRITE received");
+    std::string value = pCharacteristic->getValue();
+    if (value.length() > 0)
+    {
+      wifiPemCertificate = String(value.c_str());
+      Serial.println("[BLE] Received WiFi PEM Certificate: " + String(value.length()) + " bytes");
+    }
+    else
+    {
+      Serial.println("[BLE] WARNING: Empty WiFi PEM Certificate received");
     }
   }
 };
@@ -181,8 +242,8 @@ void startBLEProvisioning()
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
-  // Create BLE Service
-  BLEService *pService = pServer->createService(SERVICE_UUID);
+  // Create BLE Service with enough handles for all characteristics
+  BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID), 30);
 
   // Create Characteristics
   BLECharacteristic *wifiSSIDChar = pService->createCharacteristic(
@@ -194,6 +255,21 @@ void startBLEProvisioning()
       WIFI_PASSWORD_UUID,
       BLECharacteristic::PROPERTY_WRITE);
   wifiPasswordChar->setCallbacks(new WiFiPasswordCallbacks());
+
+  BLECharacteristic *wifiIdentityChar = pService->createCharacteristic(
+      WIFI_IDENTITY_UUID,
+      BLECharacteristic::PROPERTY_WRITE);
+  wifiIdentityChar->setCallbacks(new WiFiIdentityCallbacks());
+
+  BLECharacteristic *wifiAnonIdentityChar = pService->createCharacteristic(
+      WIFI_ANONYMOUS_IDENTITY_UUID,
+      BLECharacteristic::PROPERTY_WRITE);
+  wifiAnonIdentityChar->setCallbacks(new WiFiAnonIdentityCallbacks());
+
+  BLECharacteristic *wifiPemCertChar = pService->createCharacteristic(
+      WIFI_PEM_CERTIFICATE_UUID,
+      BLECharacteristic::PROPERTY_WRITE);
+  wifiPemCertChar->setCallbacks(new WiFiPemCertificateCallbacks());
 
   BLECharacteristic *baseUrlChar = pService->createCharacteristic(
       BASE_URL_UUID,
@@ -263,6 +339,9 @@ void startBLEProvisioning()
   Serial.println("\nCharacteristics:");
   Serial.println("  WiFi SSID:      " + String(WIFI_SSID_UUID));
   Serial.println("  WiFi Password:  " + String(WIFI_PASSWORD_UUID));
+  Serial.println("  WiFi Identity:  " + String(WIFI_IDENTITY_UUID));
+  Serial.println("  WiFi AnonId:    " + String(WIFI_ANONYMOUS_IDENTITY_UUID));
+  Serial.println("  WiFi PEM Cert:  " + String(WIFI_PEM_CERTIFICATE_UUID));
   Serial.println("  Base URL:       " + String(BASE_URL_UUID));
   Serial.println("  Fakts Token:    " + String(FAKTS_TOKEN_UUID));
   Serial.println("  Manifest (R):   " + String(MANIFEST_UUID));
@@ -327,7 +406,15 @@ void setup()
   String savedToken = preferences.getString("faktsToken", DEFAULT_REDEEM_TOKEN);
   savedToken.toCharArray(faktsToken, 128);
   Serial.println("Fakts Token: " + savedToken.substring(0, 10) + "...");
+
+  bool savedEnterprise = preferences.getBool("wifiEnterprise", false);
+  String savedWifiSSID = preferences.getString("wifiSSID", "");
+  String savedWifiIdentity = preferences.getString("wifiIdentity", "");
+  String savedWifiPassword = preferences.getString("wifiPassword", "");
+  String savedWifiAnonId = preferences.getString("wifiAnonId", "");
+  String savedWifiPemCert = preferences.getString("wifiPemCert", "");
   preferences.end();
+  Serial.println("Enterprise WiFi: " + String(savedEnterprise ? "yes" : "no"));
   Serial.println("===================================\n");
 
   // Check if we are already provisioned
@@ -339,12 +426,49 @@ void setup()
   Serial.print("SSID Length: ");
   Serial.println(WiFi.SSID().length());
 
-  if (WiFi.status() == WL_CONNECTED || WiFi.SSID().length() > 0)
+  bool hasStoredWifi = (WiFi.status() == WL_CONNECTED || WiFi.SSID().length() > 0 || (savedEnterprise && savedWifiSSID.length() > 0));
+
+  if (hasStoredWifi)
   {
     Serial.println("Already Provisioned. Starting Normal Mode...");
-    Serial.print("Attempting to connect to: ");
-    Serial.println(WiFi.SSID());
-    WiFi.begin(); // Connect to saved WiFi
+
+    if (savedEnterprise && savedWifiSSID.length() > 0)
+    {
+      // Reconnect using WPA2-Enterprise credentials from preferences
+      Serial.println("Reconnecting to WPA2-Enterprise WiFi: " + savedWifiSSID);
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_STA);
+
+      if (savedWifiAnonId.length() > 0)
+      {
+        esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)savedWifiAnonId.c_str(), savedWifiAnonId.length());
+      }
+      else
+      {
+        esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)savedWifiIdentity.c_str(), savedWifiIdentity.length());
+      }
+
+      esp_wifi_sta_wpa2_ent_set_username((uint8_t *)savedWifiIdentity.c_str(), savedWifiIdentity.length());
+
+      if (savedWifiPassword.length() > 0)
+      {
+        esp_wifi_sta_wpa2_ent_set_password((uint8_t *)savedWifiPassword.c_str(), savedWifiPassword.length());
+      }
+
+      if (savedWifiPemCert.length() > 0)
+      {
+        esp_wifi_sta_wpa2_ent_set_ca_cert((uint8_t *)savedWifiPemCert.c_str(), savedWifiPemCert.length() + 1);
+      }
+
+      esp_wifi_sta_wpa2_ent_enable();
+      WiFi.begin(savedWifiSSID.c_str());
+    }
+    else
+    {
+      Serial.print("Attempting to connect to: ");
+      Serial.println(WiFi.SSID());
+      WiFi.begin(); // Connect to saved WiFi (WPA-Personal)
+    }
 
     unsigned long startTime = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startTime < 20000)
@@ -403,31 +527,97 @@ void setup()
     }
 
     // Save configuration to preferences
+    preferences.begin("arkitekt", false);
     if (configBaseUrl.length() > 0)
     {
-      preferences.begin("arkitekt", false);
       preferences.putString("baseUrl", configBaseUrl);
-      preferences.end();
-      // Update runtime variable
       configBaseUrl.toCharArray(baseUrl, 128);
       Serial.println("Base URL saved: " + configBaseUrl);
     }
 
     if (configToken.length() > 0)
     {
-      preferences.begin("arkitekt", false);
       preferences.putString("faktsToken", configToken);
-      preferences.end();
-      // Update runtime variable
       configToken.toCharArray(faktsToken, 128);
       Serial.println("Fakts Token saved: " + String(configToken.length()) + " chars");
     }
 
-    // Connect to WiFi
-    if (wifiSSID.length() > 0 && wifiPassword.length() > 0)
+    // Save enterprise WiFi credentials
+    bool isEnterprise = wifiIdentity.length() > 0;
+    preferences.putBool("wifiEnterprise", isEnterprise);
+    if (isEnterprise)
     {
-      Serial.println("Connecting to WiFi: " + wifiSSID);
-      WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+      preferences.putString("wifiSSID", wifiSSID);
+      preferences.putString("wifiIdentity", wifiIdentity);
+      preferences.putString("wifiPassword", wifiPassword);
+      preferences.putString("wifiAnonId", wifiAnonIdentity);
+      preferences.putString("wifiPemCert", wifiPemCertificate);
+      Serial.println("Enterprise WiFi credentials saved");
+    }
+    preferences.end();
+
+    // Connect to WiFi
+    if (wifiSSID.length() > 0)
+    {
+      if (isEnterprise)
+      {
+        // WPA2-Enterprise (eduroam) connection
+        Serial.println("Connecting to WPA2-Enterprise WiFi: " + wifiSSID);
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_STA);
+
+        // Set outer/anonymous identity
+        if (wifiAnonIdentity.length() > 0)
+        {
+          esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)wifiAnonIdentity.c_str(), wifiAnonIdentity.length());
+          Serial.println("Set anonymous identity: " + wifiAnonIdentity);
+        }
+        else
+        {
+          esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)wifiIdentity.c_str(), wifiIdentity.length());
+        }
+
+        // Set inner identity/username
+        esp_wifi_sta_wpa2_ent_set_username((uint8_t *)wifiIdentity.c_str(), wifiIdentity.length());
+        Serial.println("Set identity/username: " + wifiIdentity);
+
+        // Set password
+        if (wifiPassword.length() > 0)
+        {
+          esp_wifi_sta_wpa2_ent_set_password((uint8_t *)wifiPassword.c_str(), wifiPassword.length());
+          Serial.println("Set password: " + String(wifiPassword.length()) + " chars");
+        }
+
+        // Set CA certificate if provided
+        if (wifiPemCertificate.length() > 0)
+        {
+          esp_wifi_sta_wpa2_ent_set_ca_cert((uint8_t *)wifiPemCertificate.c_str(), wifiPemCertificate.length() + 1);
+          Serial.println("Set CA certificate: " + String(wifiPemCertificate.length()) + " bytes");
+        }
+
+        // Enable WPA2-Enterprise
+        esp_wifi_sta_wpa2_ent_enable();
+
+        // Connect without password (enterprise handles auth)
+        WiFi.begin(wifiSSID.c_str());
+      }
+      else if (wifiPassword.length() > 0)
+      {
+        // Standard WPA/WPA2-Personal connection
+        Serial.println("Connecting to WiFi: " + wifiSSID);
+        WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+      }
+      else
+      {
+        Serial.println("No WiFi credentials provided!");
+        if (statusCharacteristic)
+        {
+          statusCharacteristic->setValue("No Credentials");
+          statusCharacteristic->notify();
+        }
+        delay(3000);
+        ESP.restart();
+      }
 
       unsigned long startTime = millis();
       while (WiFi.status() != WL_CONNECTED && millis() - startTime < 20000)
@@ -467,19 +657,6 @@ void setup()
         delay(3000);
         ESP.restart();
       }
-    }
-    else
-    {
-      Serial.println("No WiFi credentials provided!");
-
-      if (statusCharacteristic)
-      {
-        statusCharacteristic->setValue("No Credentials");
-        statusCharacteristic->notify();
-      }
-
-      delay(3000);
-      ESP.restart();
     }
   }
 
@@ -528,6 +705,12 @@ bool initializeAppFlow()
     preferences.begin("arkitekt", false);
     preferences.remove("baseUrl");
     preferences.remove("faktsToken");
+    preferences.remove("wifiEnterprise");
+    preferences.remove("wifiSSID");
+    preferences.remove("wifiIdentity");
+    preferences.remove("wifiPassword");
+    preferences.remove("wifiAnonId");
+    preferences.remove("wifiPemCert");
     preferences.end();
     Serial.println("All configuration cleared");
 
