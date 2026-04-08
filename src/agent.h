@@ -28,10 +28,10 @@ struct FunctionDefinition
     JsonArray returns;    // Array of PortInput definitions
     JsonArray portGroups; // Array of PortGroupInput definitions
 
-    FunctionDefinition() : stateful(false), isDev(false), kind("FUNCTION") {}
+    FunctionDefinition() : kind("FUNCTION"), stateful(false), isDev(false) {}
 
     FunctionDefinition(const String &name, const String &desc)
-        : name(name), description(desc), stateful(false), isDev(false), kind("FUNCTION") {}
+        : name(name), description(desc), kind("FUNCTION"), stateful(false), isDev(false) {}
 
     void toJson(JsonObject obj) const
     {
