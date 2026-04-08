@@ -4,15 +4,10 @@ An Arduino/PlatformIO library that turns an ESP32 into a first-class [Arkitekt](
 
 ## How It Works
 
-```
-┌──────────┐   BLE / Token    ┌──────────────┐   WebSocket   ┌──────────────┐
-│  Pokket  │ ───────────────► │   ESP32      │ ◄───────────► │  Arkitekt    │
-│  (Phone) │   provisioning   │  (this lib)  │   agent proto │  (Server)    │
-└──────────┘                  └──────────────┘               └──────────────┘
-```
+![Pokket App](docs/image.png)
 
-1. **Provisioning** — The ESP32 advertises a BLE service. A companion app (or a pre-set token) delivers Wi-Fi credentials and the Arkitekt connection token.
-2. **Authentication** — The device redeems the token with `lok` (Arkitekt's auth service) to obtain an OAuth2 access token.
+1. **Provisioning** — The ESP32 advertises a BLE service. The [Pokket](https://github.com/arkitektio/pokket) companion app delivers Wi-Fi credentials (yes also Eduroam) and the Arkitekt connection token.
+2. **Authentication** — The device redeems the token with an Arkitekt Coordination server to obtain an OAuth2 access token.
 3. **Agent Connection** — A WebSocket connection is established with `rekuest` (Arkitekt's task service). The device registers its functions, states, and begins listening for assignments.
 
 ## Provisioning Workflows
