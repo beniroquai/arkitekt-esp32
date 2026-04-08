@@ -61,11 +61,11 @@ public:
         }
     }
 
-    ServiceInstance *getService(const String &identifier)
+    ServiceInstance *getService(const String &key)
     {
         for (int i = 0; i < serviceCount; i++)
         {
-            if (services[i]->identifier == identifier)
+            if (services[i]->key == key)
             {
                 return services[i];
             }

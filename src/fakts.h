@@ -145,6 +145,7 @@ struct Alias
 // Service Instance
 struct ServiceInstance
 {
+    String key;        // The record key (e.g. "rekuest")
     String service;
     String identifier;
     Alias aliases[5]; // Support up to 5 aliases
@@ -156,6 +157,7 @@ struct ServiceInstance
 
     void reset()
     {
+        key = "";
         service = "";
         identifier = "";
         aliasCount = 0;
@@ -251,6 +253,7 @@ struct ServiceInstance
     void print() const
     {
         Serial.println("  Service Instance:");
+        Serial.println("    Key: " + key);
         Serial.println("    Service: " + service);
         Serial.println("    Identifier: " + identifier);
         Serial.println("    Aliases: " + String(aliasCount));
@@ -362,6 +365,7 @@ struct FaktsConfig
                     instances[instanceCount].reset();
                     if (instances[instanceCount].parseFromJson(kv.value()))
                     {
+                        instances[instanceCount].key = String(kv.key().c_str());
                         instanceCount++;
                     }
                 }
@@ -372,11 +376,11 @@ struct FaktsConfig
         return true;
     }
 
-    ServiceInstance *findInstance(const String &identifier)
+    ServiceInstance *findInstance(const String &key)
     {
         for (int i = 0; i < instanceCount; i++)
         {
-            if (instances[i].identifier == identifier)
+            if (instances[i].key == key)
             {
                 return &instances[i];
             }

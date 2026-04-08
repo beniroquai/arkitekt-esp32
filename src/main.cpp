@@ -64,6 +64,10 @@ String configBaseUrl = "";
 String configToken = "";
 bool hasNewConfig = false;
 
+// Factory reset button tracking
+unsigned long bootButtonPressStart = 0;
+bool bootButtonHeld = false;
+
 // BLE Server Callbacks
 class MyServerCallbacks : public BLEServerCallbacks
 {
@@ -165,8 +169,18 @@ class WiFiPemCertificateCallbacks : public BLECharacteristicCallbacks
     std::string value = pCharacteristic->getValue();
     if (value.length() > 0)
     {
-      wifiPemCertificate = String(value.c_str());
-      Serial.println("[BLE] Received WiFi PEM Certificate: " + String(value.length()) + " bytes");
+      // Accumulate chunks - client must send data in <=500 byte chunks
+      // Send "CLEAR" as first write to reset the buffer before sending chunks
+      if (value == "CLEAR")
+      {
+        wifiPemCertificate = "";
+        Serial.println("[BLE] PEM Certificate buffer cleared");
+      }
+      else
+      {
+        wifiPemCertificate += String(value.c_str());
+        Serial.println("[BLE] PEM Certificate chunk: " + String(value.length()) + " bytes, total: " + String(wifiPemCertificate.length()) + " bytes");
+      }
     }
     else
     {
@@ -237,6 +251,7 @@ void startBLEProvisioning()
 
   // Initialize BLE
   BLEDevice::init("ARKITEKT_CONFIG");
+  BLEDevice::setMTU(517); // Request max BLE MTU for larger writes
 
   // Create BLE Server
   pServer = BLEDevice::createServer();
@@ -361,6 +376,10 @@ void setup()
 
   Serial.println("Hello");
 
+  // Setup BOOT button (GPIO0) for factory reset - hold 5 seconds anytime
+  pinMode(0, INPUT_PULLUP);
+  Serial.println("[RESET] Hold BOOT button for 5 seconds at any time to factory reset.");
+
 #ifdef DEBUG
   Serial.println("\n=== DEBUG MODE ===");
   Serial.println("Send any character via Serial to start...");
@@ -415,6 +434,15 @@ void setup()
   String savedWifiPemCert = preferences.getString("wifiPemCert", "");
   preferences.end();
   Serial.println("Enterprise WiFi: " + String(savedEnterprise ? "yes" : "no"));
+  Serial.println("Saved WiFi SSID: '" + savedWifiSSID + "' (" + String(savedWifiSSID.length()) + " chars)");
+  Serial.println("Saved WiFi Identity: '" + savedWifiIdentity + "' (" + String(savedWifiIdentity.length()) + " chars)");
+  Serial.println("Saved WiFi Password: " + String(savedWifiPassword.length()) + " chars");
+  Serial.println("Saved WiFi AnonId: '" + savedWifiAnonId + "' (" + String(savedWifiAnonId.length()) + " chars)");
+  Serial.println("Saved WiFi PEM Cert: " + String(savedWifiPemCert.length()) + " chars");
+  if (savedWifiPemCert.length() > 0)
+  {
+    Serial.println("PEM Cert preview: " + savedWifiPemCert.substring(0, min(80, (int)savedWifiPemCert.length())) + "...");
+  }
   Serial.println("===================================\n");
 
   // Check if we are already provisioned
@@ -439,29 +467,46 @@ void setup()
       WiFi.disconnect(true);
       WiFi.mode(WIFI_STA);
 
+      esp_err_t err;
+
       if (savedWifiAnonId.length() > 0)
       {
-        esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)savedWifiAnonId.c_str(), savedWifiAnonId.length());
+        err = esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)savedWifiAnonId.c_str(), savedWifiAnonId.length());
+        Serial.println("[WPA2] Set anonymous identity: '" + savedWifiAnonId + "' (err=" + String(err) + ")");
       }
       else
       {
-        esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)savedWifiIdentity.c_str(), savedWifiIdentity.length());
+        err = esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)savedWifiIdentity.c_str(), savedWifiIdentity.length());
+        Serial.println("[WPA2] Set identity as anonymous: '" + savedWifiIdentity + "' (err=" + String(err) + ")");
       }
 
-      esp_wifi_sta_wpa2_ent_set_username((uint8_t *)savedWifiIdentity.c_str(), savedWifiIdentity.length());
+      err = esp_wifi_sta_wpa2_ent_set_username((uint8_t *)savedWifiIdentity.c_str(), savedWifiIdentity.length());
+      Serial.println("[WPA2] Set username: '" + savedWifiIdentity + "' (err=" + String(err) + ")");
 
       if (savedWifiPassword.length() > 0)
       {
-        esp_wifi_sta_wpa2_ent_set_password((uint8_t *)savedWifiPassword.c_str(), savedWifiPassword.length());
+        err = esp_wifi_sta_wpa2_ent_set_password((uint8_t *)savedWifiPassword.c_str(), savedWifiPassword.length());
+        Serial.println("[WPA2] Set password: " + String(savedWifiPassword.length()) + " chars (err=" + String(err) + ")");
+      }
+      else
+      {
+        Serial.println("[WPA2] WARNING: No password saved!");
       }
 
       if (savedWifiPemCert.length() > 0)
       {
-        esp_wifi_sta_wpa2_ent_set_ca_cert((uint8_t *)savedWifiPemCert.c_str(), savedWifiPemCert.length() + 1);
+        err = esp_wifi_sta_wpa2_ent_set_ca_cert((uint8_t *)savedWifiPemCert.c_str(), savedWifiPemCert.length() + 1);
+        Serial.println("[WPA2] Set CA cert: " + String(savedWifiPemCert.length()) + " bytes (err=" + String(err) + ")");
+      }
+      else
+      {
+        Serial.println("[WPA2] WARNING: No PEM certificate saved! Connection may fail.");
       }
 
-      esp_wifi_sta_wpa2_ent_enable();
+      err = esp_wifi_sta_wpa2_ent_enable();
+      Serial.println("[WPA2] WPA2-Enterprise enabled (err=" + String(err) + ")");
       WiFi.begin(savedWifiSSID.c_str());
+      Serial.println("[WPA2] WiFi.begin() called with SSID: " + savedWifiSSID);
     }
     else
     {
@@ -485,7 +530,27 @@ void setup()
     }
     else
     {
-      Serial.println("\nFailed to connect. Erasing WiFi config...");
+      int status = WiFi.status();
+      Serial.println("\nFailed to connect. WiFi status: " + String(status));
+      switch (status)
+      {
+      case WL_NO_SSID_AVAIL:
+        Serial.println("[WiFi] Reason: SSID not found/available");
+        break;
+      case WL_CONNECT_FAILED:
+        Serial.println("[WiFi] Reason: Connection failed (wrong password or auth rejected)");
+        break;
+      case WL_DISCONNECTED:
+        Serial.println("[WiFi] Reason: Disconnected (auth may have failed)");
+        break;
+      case 255:
+        Serial.println("[WiFi] Reason: WiFi not initialized properly");
+        break;
+      default:
+        Serial.println("[WiFi] Reason: Unknown status code " + String(status));
+        break;
+      }
+      Serial.println("Erasing WiFi config...");
       WiFi.disconnect(true, true);
       ESP.restart();
     }
@@ -552,7 +617,12 @@ void setup()
       preferences.putString("wifiPassword", wifiPassword);
       preferences.putString("wifiAnonId", wifiAnonIdentity);
       preferences.putString("wifiPemCert", wifiPemCertificate);
-      Serial.println("Enterprise WiFi credentials saved");
+      Serial.println("Enterprise WiFi credentials saved:");
+      Serial.println("  SSID: " + wifiSSID);
+      Serial.println("  Identity: " + wifiIdentity);
+      Serial.println("  Password: " + String(wifiPassword.length()) + " chars");
+      Serial.println("  AnonId: " + wifiAnonIdentity);
+      Serial.println("  PEM Cert: " + String(wifiPemCertificate.length()) + " chars");
     }
     preferences.end();
 
@@ -677,8 +747,45 @@ void setup()
   }
 }
 
+// Check BOOT button for factory reset (call from loop)
+void checkFactoryReset()
+{
+  if (digitalRead(0) == LOW)
+  {
+    if (!bootButtonHeld)
+    {
+      bootButtonHeld = true;
+      bootButtonPressStart = millis();
+      Serial.println("[RESET] BOOT button pressed...");
+    }
+    else if (millis() - bootButtonPressStart >= 5000)
+    {
+      Serial.println("\n[RESET] BOOT button held for 5 seconds! Factory reset triggered!");
+      Serial.println("[RESET] Erasing all saved config...");
+      Preferences resetPrefs;
+      resetPrefs.begin("arkitekt", false);
+      resetPrefs.clear();
+      resetPrefs.end();
+      WiFi.disconnect(true, true);
+      Serial.println("[RESET] Done. Restarting...");
+      delay(1000);
+      ESP.restart();
+    }
+  }
+  else
+  {
+    if (bootButtonHeld)
+    {
+      Serial.println("[RESET] BOOT button released before 5 seconds.");
+    }
+    bootButtonHeld = false;
+  }
+}
+
 void loop()
 {
+  checkFactoryReset();
+
   if (appReady)
   {
     webSocket.loop();

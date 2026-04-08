@@ -220,11 +220,9 @@ mutation EnsureAgent($input: AgentInput!) {
 
         // Build GraphQL mutation
         String mutation = R"(
-mutation SetExtensionImplementations($input: SetExtensionImplementationsInput!) {
-  setExtensionImplementations(input: $input) {
+mutation ImplementAgent($input: ImplementAgentInput!) {
+  implementAgent(input: $input) {
     id
-    interface
-    extension
   }
 }
 )";
