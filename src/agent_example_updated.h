@@ -162,6 +162,16 @@ void registerSensorFunctionUpdated(Agent *agent)
             returns["unit"] = "celsius";
             returns["samples"] = samples;
 
+            // Update agent state
+            AgentState *sensorStatus = agent.getState("sensor_status");
+            if (sensorStatus)
+            {
+                sensorStatus->setPort("temperature", value);
+                static int readingsCount = 0;
+                readingsCount++;
+                sensorStatus->setPort("readings_count", readingsCount);
+            }
+
             Serial.println("Sensor " + sensorId + ": " + String(value) + "°C (avg of " + String(samples) + " samples)");
 
             return true;
@@ -212,6 +222,14 @@ void registerLEDControlUpdated(Agent *agent)
             returns["pin"] = pin;
             returns["state"] = state;
             returns["success"] = true;
+
+            // Update agent state
+            AgentState *ledStatus = agent.getState("led_status");
+            if (ledStatus)
+            {
+                ledStatus->setPort("on", state);
+                ledStatus->setPort("pin", pin);
+            }
 
             Serial.println("LED on pin " + String(pin) + " set to " + String(state ? "ON" : "OFF"));
 
@@ -301,10 +319,67 @@ void registerToggleLedUpdated(Agent *agent)
             returns["state"] = ledState;
             returns["success"] = true;
 
+            // Update agent state
+            AgentState *ledStatus = agent.getState("led_status");
+            if (ledStatus)
+            {
+                ledStatus->setPort("on", ledState);
+            }
+
             Serial.println("LED on GPIO2 toggled to " + String(ledState ? "ON" : "OFF"));
 
             return true;
         });
+}
+
+// State definition documents (must persist)
+DynamicJsonDocument ledStatePortsDoc(512);
+DynamicJsonDocument sensorStatePortsDoc(512);
+
+// Register example states
+void registerExampleStates(Agent *agent)
+{
+    Serial.println("\n=== Registering Example States ===");
+
+    // LED state - tracks the current LED status
+    {
+        StateDefinition def("led_status", "LED Status", "Current state of the onboard LED");
+        JsonArray ports = ledStatePortsDoc.to<JsonArray>();
+        PortBuilder::createBoolPort(ports, "on", "On", "Whether the LED is currently on", false);
+        PortBuilder::createIntPort(ports, "pin", "Pin", "GPIO pin number", false);
+        def.ports = ports;
+
+        agent->registerState("led_status", def);
+
+        // Set initial values
+        AgentState *state = agent->getState("led_status");
+        if (state)
+        {
+            state->setPort("on", true); // LED starts HIGH in setup()
+            state->setPort("pin", 2);
+        }
+    }
+
+    // Sensor state - tracks last sensor reading
+    {
+        StateDefinition def("sensor_status", "Sensor Status", "Last sensor reading values");
+        JsonArray ports = sensorStatePortsDoc.to<JsonArray>();
+        PortBuilder::createFloatPort(ports, "temperature", "Temperature", "Last temperature reading in celsius", false);
+        PortBuilder::createIntPort(ports, "readings_count", "Readings Count", "Total number of readings taken", false);
+        def.ports = ports;
+
+        agent->registerState("sensor_status", def);
+
+        // Set initial values
+        AgentState *state = agent->getState("sensor_status");
+        if (state)
+        {
+            state->setPort("temperature", 0.0f);
+            state->setPort("readings_count", 0);
+        }
+    }
+
+    Serial.println("✓ All example states registered\n");
 }
 
 // Register all updated example functions
@@ -319,6 +394,8 @@ void registerAllUpdatedExamples(Agent *agent)
     registerToggleLedUpdated(agent);
 
     Serial.println("✓ All updated example functions registered\n");
+
+    registerExampleStates(agent);
 }
 
 #endif // AGENT_EXAMPLE_UPDATED_H

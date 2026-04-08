@@ -882,6 +882,9 @@ bool initializeAppFlow()
   registerAllUpdatedExamples(globalAgent);
   globalAgent->printRegistry();
 
+  // Set WebSocket reference on agent before connecting
+  globalAgent->setWebSocket(&webSocket);
+
   // Ensure agent on server
   String agentError;
   DynamicJsonDocument extensionsDoc(256);
@@ -1081,6 +1084,16 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
       if (typeStr == "HEARTBEAT")
       {
         handleHeartbeat();
+        return;
+      }
+      if (typeStr == "INIT")
+      {
+        Serial.println("✓ Server acknowledged REGISTER with INIT");
+        // Send SESSION_INIT with current state snapshots
+        if (globalAgent != nullptr)
+        {
+          globalAgent->sendSessionInit();
+        }
         return;
       }
       if (typeStr == "ASSIGN")

@@ -3,12 +3,14 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <WebSocketsClient.h>
 #include <functional>
 #include <map>
 #include "app.h"
 
-// Forward declaration
+// Forward declarations
 class Agent;
+class AgentState;
 
 // Function callback type: takes (Agent&, JsonObject args) and returns JsonObject with results
 typedef std::function<bool(Agent &, JsonObject, JsonObject &)> AgentFunction;
@@ -139,6 +141,129 @@ public:
     }
 };
 
+// Simple UUID4 generator for agent messages
+inline String agentGenerateUUID4()
+{
+    String uuid = "";
+    const char *hexChars = "0123456789abcdef";
+    for (int i = 0; i < 36; i++)
+    {
+        if (i == 8 || i == 13 || i == 18 || i == 23)
+            uuid += "-";
+        else if (i == 14)
+            uuid += "4";
+        else if (i == 19)
+            uuid += hexChars[(random(0, 4) + 8)];
+        else
+            uuid += hexChars[random(0, 16)];
+    }
+    return uuid;
+}
+
+// State definition structure
+struct StateDefinition
+{
+    String key;
+    String name;
+    String description;
+    JsonArray ports; // Array of PortInput definitions (like return ports)
+
+    StateDefinition() {}
+    StateDefinition(const String &key, const String &name, const String &desc)
+        : key(key), name(name), description(desc) {}
+};
+
+// Agent State - holds current state values and sends patches over WebSocket
+class AgentState
+{
+private:
+    String interfaceName;
+    StateDefinition definition;
+    DynamicJsonDocument valuesDoc;
+    WebSocketsClient *ws;
+    String *sessionId;
+    int *globalRevPtr; // Points to Agent's global revision counter
+
+    void sendPatch(const String &key, const JsonVariant &oldValue)
+    {
+        if (!ws || !sessionId || sessionId->length() == 0)
+            return;
+
+        (*globalRevPtr)++;
+
+        DynamicJsonDocument patchDoc(512);
+        patchDoc["type"] = "STATE_PATCH";
+        patchDoc["id"] = agentGenerateUUID4();
+        patchDoc["session_id"] = *sessionId;
+        patchDoc["global_rev"] = *globalRevPtr;
+        patchDoc["state_name"] = interfaceName;
+        patchDoc["ts"] = (double)millis() / 1000.0;
+        patchDoc["op"] = "replace";
+        patchDoc["path"] = "/" + key;
+        patchDoc["value"] = valuesDoc[key];
+        if (!oldValue.isNull())
+            patchDoc["old_value"] = oldValue;
+        else
+            patchDoc["old_value"] = (const char *)nullptr;
+
+        String msg;
+        serializeJson(patchDoc, msg);
+        Serial.println("[STATE] Patch >> " + msg);
+        ws->sendTXT(msg);
+    }
+
+public:
+    AgentState(const String &iface, const StateDefinition &def, WebSocketsClient *websocket, String *session, int *globalRev)
+        : interfaceName(iface), definition(def), valuesDoc(1024), ws(websocket), sessionId(session), globalRevPtr(globalRev)
+    {
+        valuesDoc.to<JsonObject>(); // Initialize as empty object
+    }
+
+    void setPort(const String &key, int value)
+    {
+        JsonVariant oldVal = valuesDoc[key];
+        DynamicJsonDocument oldDoc(64);
+        if (!oldVal.isNull()) oldDoc.set(oldVal);
+        valuesDoc[key] = value;
+        sendPatch(key, oldDoc.as<JsonVariant>());
+    }
+
+    void setPort(const String &key, float value)
+    {
+        JsonVariant oldVal = valuesDoc[key];
+        DynamicJsonDocument oldDoc(64);
+        if (!oldVal.isNull()) oldDoc.set(oldVal);
+        valuesDoc[key] = value;
+        sendPatch(key, oldDoc.as<JsonVariant>());
+    }
+
+    void setPort(const String &key, const String &value)
+    {
+        JsonVariant oldVal = valuesDoc[key];
+        DynamicJsonDocument oldDoc(128);
+        if (!oldVal.isNull()) oldDoc.set(oldVal);
+        valuesDoc[key] = value;
+        sendPatch(key, oldDoc.as<JsonVariant>());
+    }
+
+    void setPort(const String &key, bool value)
+    {
+        JsonVariant oldVal = valuesDoc[key];
+        DynamicJsonDocument oldDoc(64);
+        if (!oldVal.isNull()) oldDoc.set(oldVal);
+        valuesDoc[key] = value;
+        sendPatch(key, oldDoc.as<JsonVariant>());
+    }
+
+    JsonObject getSnapshot()
+    {
+        return valuesDoc.as<JsonObject>();
+    }
+
+    const String &getInterface() const { return interfaceName; }
+    const StateDefinition &getDefinition() const { return definition; }
+};
+
 // Agent class
 class Agent
 {
@@ -149,17 +274,38 @@ private:
     String agentName;
     FunctionRegistry *registry;
     String currentAssignation;
+    std::map<String, AgentState *> states;
+    std::map<String, StateDefinition> stateDefinitions;
+    WebSocketsClient *ws;
+    String sessionId;
+    int globalRev;
 
 public:
     Agent(App *appInstance, const String &service, const String &instance, const String &name)
-        : app(appInstance), serviceIdentifier(service), instanceId(instance), agentName(name)
+        : app(appInstance), serviceIdentifier(service), instanceId(instance), agentName(name), ws(nullptr), globalRev(0)
     {
         registry = new FunctionRegistry();
+        sessionId = agentGenerateUUID4();
+        Serial.println("[AGENT] Session ID: " + sessionId);
     }
 
     ~Agent()
     {
         delete registry;
+        for (auto &pair : states)
+        {
+            delete pair.second;
+        }
+    }
+
+    void setWebSocket(WebSocketsClient *websocket)
+    {
+        ws = websocket;
+    }
+
+    const String &getSessionId() const
+    {
+        return sessionId;
     }
 
     FunctionRegistry *getRegistry()
@@ -171,6 +317,82 @@ public:
     {
         registry->registerFunction(functionName, definition, callback);
     }
+
+    void registerState(const String &stateName, const StateDefinition &definition)
+    {
+        stateDefinitions[stateName] = definition;
+        AgentState *state = new AgentState(stateName, definition, ws, &sessionId, &globalRev);
+        states[stateName] = state;
+        Serial.println("Registered state: " + stateName);
+    }
+
+    AgentState *getState(const String &stateName)
+    {
+        auto it = states.find(stateName);
+        if (it != states.end())
+        {
+            return it->second;
+        }
+        Serial.println("[AGENT] Warning: State not found: " + stateName);
+        return nullptr;
+    }
+
+    const std::map<String, StateDefinition> &getStateDefinitions() const
+    {
+        return stateDefinitions;
+    }
+
+    void sendSessionInit()
+    {
+        if (!ws)
+        {
+            Serial.println("[AGENT] Cannot send SESSION_INIT: no WebSocket");
+            return;
+        }
+
+        DynamicJsonDocument doc(4096);
+        doc["type"] = "SESSION_INIT";
+        doc["id"] = agentGenerateUUID4();
+        doc["session_id"] = sessionId;
+
+        // states is a dict: { state_name: snapshot, ... }
+        JsonObject statesObj = doc["states"].to<JsonObject>();
+        for (const auto &pair : states)
+        {
+            statesObj[pair.first] = pair.second->getSnapshot();
+        }
+
+        String msg;
+        serializeJson(doc, msg);
+        Serial.println("[AGENT] SESSION_INIT >> " + msg);
+        ws->sendTXT(msg);
+    }
+
+    void sendStateSnapshot()
+    {
+        if (!ws)
+            return;
+
+        DynamicJsonDocument doc(4096);
+        doc["type"] = "STATE_SNAPSHOT";
+        doc["id"] = agentGenerateUUID4();
+        doc["session_id"] = sessionId;
+        doc["global_rev"] = globalRev;
+
+        // snapshots is a dict: { state_name: snapshot, ... }
+        JsonObject snapshots = doc["snapshots"].to<JsonObject>();
+        for (const auto &pair : states)
+        {
+            snapshots[pair.first] = pair.second->getSnapshot();
+        }
+
+        String msg;
+        serializeJson(doc, msg);
+        Serial.println("[AGENT] STATE_SNAPSHOT >> " + msg);
+        ws->sendTXT(msg);
+    }
+
+    int getGlobalRev() const { return globalRev; }
 
     bool ensureAgent(const String &name, const JsonArray &extensions, String &errorMessage)
     {
@@ -240,6 +462,15 @@ private:
             hashInput += String(pair.second.stateful) + "|";
             hashInput += String(pair.second.args.size()) + "|";
             hashInput += String(pair.second.returns.size()) + ";";
+        }
+
+        // Include state definitions in hash
+        for (const auto &pair : stateDefinitions)
+        {
+            hashInput += "S:" + pair.first + "|";
+            hashInput += pair.second.name + "|";
+            hashInput += pair.second.key + "|";
+            hashInput += String(pair.second.ports.size()) + ";";
         }
 
         // Simple hash: djb2
@@ -343,13 +574,25 @@ mutation ImplementAgent($input: ImplementAgentInput!) {
             implInput["dependencies"].to<JsonArray>();
         }
 
-        // States - empty for now
-        // input["states"].to<JsonArray>();
+        // States - StateImplementationInput[]
+        JsonArray statesArr = input["states"].to<JsonArray>();
+        for (const auto &pair : stateDefinitions)
+        {
+            JsonObject stateImpl = statesArr.add<JsonObject>();
+            stateImpl["interface"] = pair.first;
+            stateImpl["extension"] = "default";
 
-        // Locks - empty for now
-        // input["locks"].to<JsonArray>();
+            JsonObject stateDef = stateImpl["definition"].to<JsonObject>();
+            stateDef["name"] = pair.second.name;
+            stateDef["description"] = pair.second.description;
 
-        Serial.println("Implementing agent with " + String(definitions.size()) + " function(s)");
+            if (pair.second.ports.size() > 0)
+                stateDef["ports"] = pair.second.ports;
+            else
+                stateDef["ports"].to<JsonArray>();
+        }
+
+        Serial.println("Implementing agent with " + String(definitions.size()) + " function(s) and " + String(stateDefinitions.size()) + " state(s)");
 
         String response;
         if (!app->graphqlRequest(serviceIdentifier, mutation, vars, response, errorMessage))
