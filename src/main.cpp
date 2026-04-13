@@ -14,6 +14,7 @@
 #include "app.h"
 #include "agent.h"
 #include "agent_example_updated.h"
+#include "stepper_motor.h"
 #include "config_defaults.h"
 
 // BLE UUIDs for our custom provisioning service
@@ -773,6 +774,7 @@ bool initializeAppFlow()
 
   // Register functions
   registerAllUpdatedExamples(globalAgent);
+  registerAllStepperFunctions(globalAgent);
   globalAgent->printRegistry();
 
   // Ensure agent on server
