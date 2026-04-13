@@ -117,7 +117,7 @@ public:
     // Add a slider widget to a port
     static void addSliderWidget(JsonObject &port, float min, float max, float step = 1.0)
     {
-        JsonObject widget = port["assignWidget"].to<JsonObject>();
+        JsonObject widget = port["widget"].to<JsonObject>();
         widget["kind"] = "SLIDER";
         widget["min"] = min;
         widget["max"] = max;
@@ -127,7 +127,7 @@ public:
     // Add a string widget to a port
     static void addStringWidget(JsonObject &port, const String &placeholder = "", bool asParagraph = false)
     {
-        JsonObject widget = port["assignWidget"].to<JsonObject>();
+        JsonObject widget = port["widget"].to<JsonObject>();
         widget["kind"] = "STRING";
         widget["placeholder"] = placeholder;
         widget["asParagraph"] = asParagraph;
@@ -158,7 +158,7 @@ public:
     // Add a choice widget to a port
     static void addChoiceWidget(JsonObject &port)
     {
-        JsonObject widget = port["assignWidget"].to<JsonObject>();
+        JsonObject widget = port["widget"].to<JsonObject>();
         widget["kind"] = "CHOICE";
         // Choices should already be set on the port itself
     }
@@ -200,45 +200,6 @@ public:
         JsonObject descriptor = descriptors.add<JsonObject>();
         descriptor["key"] = key;
         descriptor["value"] = value;
-    }
-};
-
-// Helper function to create a complete FunctionDefinition with typed ports
-class DefinitionBuilder
-{
-public:
-    static FunctionDefinition create(
-        const String &name,
-        const String &description,
-        const String &kind = "FUNCTION",
-        bool stateful = false)
-    {
-        FunctionDefinition def(name, description);
-        def.kind = kind;
-        def.stateful = stateful;
-        return def;
-    }
-
-    // Helper to add ports to a definition
-    static void setArgs(FunctionDefinition &def, JsonArray args)
-    {
-        def.args = args;
-    }
-
-    static void setReturns(FunctionDefinition &def, JsonArray returns)
-    {
-        def.returns = returns;
-    }
-
-    static void addInterface(FunctionDefinition &def, const String &interface)
-    {
-        // Note: This requires the JsonArray to be allocated in a persistent document
-        // In practice, you'd need to maintain this document alongside the definition
-    }
-
-    static void addCollection(FunctionDefinition &def, const String &collection)
-    {
-        // Same note as above
     }
 };
 
