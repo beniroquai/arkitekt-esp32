@@ -4,41 +4,37 @@
 /*
  * Stepper Motor Control via FastAccelStepper
  *
- * Registers three agent functions:
+ * Registers two agent functions and one live state:
  *   - stepper_move : move absolute or relative; sign of steps sets direction;
  *                    speed and acceleration are optional per-call overrides
- *   - stepper_stop : stop with deceleration or immediate force-stop
- *   - get_stepper_state : poll position & running state (call regularly,
- *                         same pattern as registerSensorFunctionUpdated)
+ *   - stepper_stop : smooth deceleration or immediate force-stop
  *
- * Adjust the pin constants below to match your wiring before use.
+ * Motor position / state is pushed automatically as an AgentState
+ * ("stepper_state") via a background task – same pattern as sensor_status.
+ *
+ * Adjust the pin constants below to match your wiring.
  */
 
-#include "agent.h"
-#include "port_builder.h"
+#include "lib/arkitekt_app.h"
 #include <FastAccelStepper.h>
 
-// ── Pin configuration – adjust to match your hardware ────────────────────────
-#define STEPPER_STEP_PIN   4  // GPIO connected to driver STEP input
-#define STEPPER_DIR_PIN    5  // GPIO connected to driver DIR  input
-#define STEPPER_ENABLE_PIN 6  // GPIO connected to driver EN   input; set to -1 to skip
+// ── Pin configuration ─────────────────────────────────────────────────────────
+#define STEPPER_STEP_PIN   4   // GPIO connected to driver STEP input
+#define STEPPER_DIR_PIN    5   // GPIO connected to driver DIR  input
+#define STEPPER_ENABLE_PIN 6   // GPIO connected to driver EN   input; -1 to skip
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Persistent JSON documents (must outlive the agent for the lifetime of the program)
-DynamicJsonDocument stepperMoveArgsDoc(512);
-DynamicJsonDocument stepperMoveReturnsDoc(256);
-DynamicJsonDocument stepperStopArgsDoc(256);
-DynamicJsonDocument stepperStopReturnsDoc(256);
-DynamicJsonDocument stepperStateReturnsDoc(512);
-
-// Global stepper engine and motor handle
+// Global stepper engine and motor handle (file-scope, persist for program lifetime)
 static FastAccelStepperEngine stepperEngine;
 static FastAccelStepper *stepper = nullptr;
 static bool stepperInitialized = false;
 
-// Initialize the FastAccelStepper engine and bind to the configured pins
-static void initStepper()
+// Initialize the FastAccelStepper engine and bind to the configured pins.
+// Call once from setup() before registerAllStepperFunctions().
+void initStepper()
 {
+    log_i("Initializing stepper motor...  step=%d  dir=%d  en=%d",
+          STEPPER_STEP_PIN, STEPPER_DIR_PIN, STEPPER_ENABLE_PIN);
     stepperEngine.init();
     stepper = stepperEngine.stepperConnectToPin(STEPPER_STEP_PIN);
 
@@ -66,231 +62,170 @@ static void initStepper()
                    "  en=" + String(STEPPER_ENABLE_PIN));
 }
 
-// ── stepper_move ──────────────────────────────────────────────────────────────
-void registerStepperMove(Agent *agent)
+// ── Helper: push current motor values into the AgentState ────────────────────
+static void updateStepperState(AgentState *state)
 {
-    FunctionDefinition def = DefinitionBuilder::create(
-        "stepper_move",
-        "Move the stepper motor. Positive steps move forward, negative steps move backward. "
-        "Use mode='absolute' to target an absolute position or 'relative' for a step offset.",
-        "FUNCTION",
-        false);
+    if (!state)
+        return;
 
-    JsonArray args = stepperMoveArgsDoc.to<JsonArray>();
+    if (!stepperInitialized || stepper == nullptr)
+    {
+        state->setPort("current_position", 0);
+        state->setPort("target_position",  0);
+        state->setPort("is_running",        false);
+        state->setPort("speed_hz",          0);
+        return;
+    }
 
-    JsonObject stepsArg = PortBuilder::createIntPort(
-        args, "steps", "Steps / Target",
-        "Steps to move (relative) or target position (absolute). Sign sets direction.", false);
-    PortBuilder::setDefault(stepsArg, 0);
-
-    JsonObject modeArg = PortBuilder::createStringPort(
-        args, "mode", "Mode",
-        "absolute: go to exact step position; relative: move by this many steps from current", false);
-    PortBuilder::addChoice(modeArg, "Relative", "relative", "Move by the given number of steps");
-    PortBuilder::addChoice(modeArg, "Absolute", "absolute", "Move to the given absolute position");
-    PortBuilder::addChoiceWidget(modeArg);
-    PortBuilder::setDefault(modeArg, "relative");
-
-    JsonObject speedArg = PortBuilder::createIntPort(
-        args, "speed_hz", "Speed (steps/s)",
-        "Motor speed in steps per second (optional, keeps last value if omitted)", true);
-    PortBuilder::setDefault(speedArg, 1000);
-    PortBuilder::addSliderWidget(speedArg, 1, 10000, 100);
-
-    JsonObject accelArg = PortBuilder::createIntPort(
-        args, "acceleration", "Acceleration (steps/s²)",
-        "Ramp acceleration in steps per second squared (optional, keeps last value if omitted)", true);
-    PortBuilder::setDefault(accelArg, 500);
-    PortBuilder::addSliderWidget(accelArg, 1, 5000, 100);
-
-    def.args = args;
-
-    JsonArray returns = stepperMoveReturnsDoc.to<JsonArray>();
-    PortBuilder::createIntPort(returns, "current_position", "Current Position",
-                               "Step position at the time the command was issued", false);
-    PortBuilder::createIntPort(returns, "target_position", "Target Position",
-                               "Destination step position", false);
-    PortBuilder::createBoolPort(returns, "success", "Success",
-                                "Whether the move command was accepted", false);
-
-    def.returns = returns;
-
-    agent->registerFunction(
-        "stepper_move",
-        def,
-        [](Agent &agent, JsonObject args, JsonObject &returns) -> bool
-        {
-            if (!stepperInitialized || stepper == nullptr)
-            {
-                Serial.println("✗ stepper_move: stepper not initialized");
-                returns["success"] = false;
-                return false;
-            }
-
-            int32_t steps = (int32_t)(args["steps"] | 0);
-            String mode = args["mode"] | "relative";
-
-            // Apply speed/acceleration only when the caller supplies them
-            if (!args["speed_hz"].isNull())
-            {
-                uint32_t speedHz = (uint32_t)max(1, (int)(args["speed_hz"] | 1000));
-                stepper->setSpeedInHz(speedHz);
-            }
-
-            if (!args["acceleration"].isNull())
-            {
-                uint32_t accel = (uint32_t)max(1, (int)(args["acceleration"] | 500));
-                stepper->setAcceleration(accel);
-            }
-
-            if (mode == "absolute")
-            {
-                stepper->moveTo(steps);
-            }
-            else
-            {
-                stepper->move(steps);
-            }
-
-            returns["current_position"] = (int32_t)stepper->getCurrentPosition();
-            returns["target_position"] = (int32_t)stepper->getPositionAfterCommandsCompleted();
-            returns["success"] = true;
-
-            Serial.println("stepper_move  mode=" + mode +
-                           "  steps=" + String(steps) +
-                           "  pos=" + String(stepper->getCurrentPosition()));
-            return true;
-        });
+    state->setPort("current_position", (int)stepper->getCurrentPosition());
+    state->setPort("target_position",  (int)stepper->getPositionAfterCommandsCompleted());
+    state->setPort("is_running",        stepper->isRunning());
+    state->setPort("speed_hz",         (int)(stepper->getCurrentSpeedInMilliHz() / 1000));
 }
 
-// ── stepper_stop ──────────────────────────────────────────────────────────────
-void registerStepperStop(Agent *agent)
-{
-    FunctionDefinition def = DefinitionBuilder::create(
-        "stepper_stop",
-        "Stop the stepper motor. Use emergency=true for an immediate halt, "
-        "or false (default) to decelerate smoothly to a stop.",
-        "FUNCTION",
-        false);
-
-    JsonArray args = stepperStopArgsDoc.to<JsonArray>();
-
-    JsonObject emergencyArg = PortBuilder::createBoolPort(
-        args, "emergency", "Emergency Stop",
-        "true = immediate stop (no deceleration); false = ramp down smoothly", false);
-    PortBuilder::setDefault(emergencyArg, false);
-
-    def.args = args;
-
-    JsonArray returns = stepperStopReturnsDoc.to<JsonArray>();
-    PortBuilder::createIntPort(returns, "position", "Position",
-                               "Step position when the stop command was issued", false);
-    PortBuilder::createBoolPort(returns, "success", "Success",
-                                "Whether the stop command was issued", false);
-
-    def.returns = returns;
-
-    agent->registerFunction(
-        "stepper_stop",
-        def,
-        [](Agent &agent, JsonObject args, JsonObject &returns) -> bool
-        {
-            if (!stepperInitialized || stepper == nullptr)
-            {
-                returns["success"] = false;
-                return false;
-            }
-
-            bool emergency = args["emergency"] | false;
-
-            if (emergency)
-            {
-                stepper->forceStop();
-            }
-            else
-            {
-                stepper->stopMove();
-            }
-
-            returns["position"] = (int32_t)stepper->getCurrentPosition();
-            returns["success"] = true;
-
-            Serial.println(String("stepper_stop") + (emergency ? " (emergency)" : " (decel)") +
-                           "  pos=" + String(stepper->getCurrentPosition()));
-            return true;
-        });
-}
-
-// ── get_stepper_state ─────────────────────────────────────────────────────────
-// No arguments, mirrors the sensor pattern: call this regularly to poll motor state.
-void registerStepperGetState(Agent *agent)
-{
-    FunctionDefinition def = DefinitionBuilder::create(
-        "get_stepper_state",
-        "Read the current stepper motor position and running state. "
-        "Call this regularly to track position, similar to a sensor reading.",
-        "FUNCTION",
-        false);
-
-    // No input arguments
-    JsonArray args;
-    def.args = args;
-
-    JsonArray returns = stepperStateReturnsDoc.to<JsonArray>();
-    PortBuilder::createIntPort(returns, "current_position", "Current Position",
-                               "Current step position", false);
-    PortBuilder::createIntPort(returns, "target_position", "Target Position",
-                               "Target step position (equals current_position when idle)", false);
-    PortBuilder::createBoolPort(returns, "is_running", "Is Running",
-                                "True while the motor is actively moving", false);
-    PortBuilder::createIntPort(returns, "speed_hz", "Speed (steps/s)",
-                               "Current instantaneous speed in steps per second", false);
-
-    def.returns = returns;
-
-    agent->registerFunction(
-        "get_stepper_state",
-        def,
-        [](Agent &agent, JsonObject args, JsonObject &returns) -> bool
-        {
-            if (!stepperInitialized || stepper == nullptr)
-            {
-                // Return safe zero-state when hardware is not present
-                returns["current_position"] = 0;
-                returns["target_position"] = 0;
-                returns["is_running"] = false;
-                returns["speed_hz"] = 0;
-                return true;
-            }
-
-            int32_t currentPos = stepper->getCurrentPosition();
-            int32_t targetPos = stepper->getPositionAfterCommandsCompleted();
-            bool isRunning = stepper->isRunning();
-            // getCurrentSpeedInMilliHz returns speed * 1000; convert to Hz
-            int32_t speedHz = (int32_t)(stepper->getCurrentSpeedInMilliHz() / 1000);
-
-            returns["current_position"] = currentPos;
-            returns["target_position"] = targetPos;
-            returns["is_running"] = isRunning;
-            returns["speed_hz"] = speedHz;
-
-            Serial.println("get_stepper_state  pos=" + String(currentPos) +
-                           "  target=" + String(targetPos) +
-                           "  running=" + String(isRunning ? "yes" : "no") +
-                           "  speed=" + String(speedHz) + " Hz");
-            return true;
-        });
-}
-
-// ── Register all stepper functions ────────────────────────────────────────────
-void registerAllStepperFunctions(Agent *agent)
+// ── Register everything with the ArkitektApp ─────────────────────────────────
+void registerAllStepperFunctions(ArkitektApp &app)
 {
     Serial.println("\n=== Registering Stepper Motor Functions ===");
 
-    initStepper();
-    registerStepperMove(agent);
-    registerStepperStop(agent);
-    registerStepperGetState(agent);
+    // ── State: stepper_state (pushed periodically from background task) ───────
+    {
+        auto def = StateBuilder("stepper_state", "Stepper Motor State", 256)
+            .portInt("current_position", "Current Position", "Steps from origin")
+            .portInt("target_position",  "Target Position",  "Steps target (equals current when idle)")
+            .portBool("is_running",       "Running",          "True while motor is moving")
+            .portInt("speed_hz",          "Speed (steps/s)",  "Instantaneous speed in steps/s")
+            .build();
+
+        app.registerState("stepper_state", def, [](AgentState *state)
+                          {
+                              state->setPort("current_position", 0);
+                              state->setPort("target_position",  0);
+                              state->setPort("is_running",        false);
+                              state->setPort("speed_hz",          0);
+                          });
+    }
+
+    // ── Background task: update stepper_state every 500 ms ───────────────────
+    app.registerBackgroundTask(
+        [](ArkitektApp &app, Agent &agent)
+        {
+            updateStepperState(agent.getState("stepper_state"));
+        },
+        500);
+
+    // ── Function: stepper_move ────────────────────────────────────────────────
+    {
+        auto def = FunctionBuilder("stepper_move",
+                                   "Move the stepper motor. Positive steps → forward, negative → backward. "
+                                   "Use isRel=true to target an exact position, 'relative' for an offset.",
+                                   512, 256)
+            .argInt("steps", "Steps / Target",
+                    "Steps to move (relative) or target position (absolute). Sign sets direction.")
+            .withDefault("steps", 0)
+            .argBool("isRel", "isRel",
+                             "absolute: go to exact step position; relative: offset from current", true)
+                                        .withDefault("isRel", true)
+            .argInt("speed_hz", "Speed (steps/s)",
+                    "Motor speed in steps per second (keeps last value if 0)")
+            .withDefault("speed_hz", 1000)
+            .withSlider("speed_hz", 1, 10000, 100)
+            .argInt("acceleration", "Acceleration (steps/s²)",
+                    "Ramp acceleration, steps/s² (keeps last value if 0)")
+            .withDefault("acceleration", 500)
+            .withSlider("acceleration", 1, 5000, 100)
+            .returnInt("current_position", "Current Position", "Step position when command was issued")
+            .returnInt("target_position",  "Target Position",  "Destination step position")
+            .returnBool("success",          "Success",          "Whether the move command was accepted")
+            .build();
+
+        app.registerFunction(
+            "stepper_move", def,
+            [](ArkitektApp &app, Agent &agent, JsonObject args, ReplyChannel &reply) -> bool
+            {
+                if (!stepperInitialized || stepper == nullptr)
+                {
+                    reply.critical("Stepper not initialized");
+                    return false;
+                }
+
+                int32_t steps = (int32_t)(args["steps"] | 0);
+                bool isRel   = args["isRel"] | 1;
+                int speedHz   = args["speed_hz"]    | 0;
+                int accel     = args["acceleration"] | 0;
+
+                if (speedHz > 0)
+                    stepper->setSpeedInHz((uint32_t)speedHz);
+                if (accel > 0)
+                    stepper->setAcceleration((uint32_t)accel);
+
+                if (isRel == 1) // absolute
+                    stepper->moveTo(steps);
+                else
+                    stepper->move(steps);
+
+                // Immediately push updated state
+                updateStepperState(agent.getState("stepper_state"));
+
+                StaticJsonDocument<128> retDoc;
+                JsonObject ret = retDoc.to<JsonObject>();
+                ret["current_position"] = (int32_t)stepper->getCurrentPosition();
+                ret["target_position"]  = (int32_t)stepper->getPositionAfterCommandsCompleted();
+                ret["success"]          = true;
+                reply.done(ret);
+
+                Serial.println("[STEPPER] move  isRel=" + String(isRel) +
+                               "  steps=" + String(steps) +
+                               "  pos="   + String(stepper->getCurrentPosition()));
+                return true;
+            });
+    }
+
+    // ── Function: stepper_stop ────────────────────────────────────────────────
+    {
+        auto def = FunctionBuilder("stepper_stop",
+                                   "Stop the stepper motor. emergency=false ramps down smoothly; "
+                                   "emergency=true halts immediately.",
+                                   256, 128)
+            .argBool("emergency", "Emergency Stop",
+                     "true = immediate stop; false = decelerate to stop")
+            .withDefault("emergency", false)
+            .returnInt("position", "Position", "Step position when stop was issued")
+            .returnBool("success",  "Success",  "Whether the stop command was issued")
+            .build();
+
+        app.registerFunction(
+            "stepper_stop", def,
+            [](ArkitektApp &app, Agent &agent, JsonObject args, ReplyChannel &reply) -> bool
+            {
+                if (!stepperInitialized || stepper == nullptr)
+                {
+                    reply.critical("Stepper not initialized");
+                    return false;
+                }
+
+                bool emergency = args["emergency"] | false;
+
+                if (emergency)
+                    stepper->forceStop();
+                else
+                    stepper->stopMove();
+
+                // Immediately push updated state
+                updateStepperState(agent.getState("stepper_state"));
+
+                StaticJsonDocument<64> retDoc;
+                JsonObject ret = retDoc.to<JsonObject>();
+                ret["position"] = (int32_t)stepper->getCurrentPosition();
+                ret["success"]  = true;
+                reply.done(ret);
+
+                Serial.println(String("[STEPPER] stop") +
+                               (emergency ? " (emergency)" : " (decel)") +
+                               "  pos=" + String(stepper->getCurrentPosition()));
+                return true;
+            });
+    }
 
     Serial.println("✓ All stepper motor functions registered\n");
 }
