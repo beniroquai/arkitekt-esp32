@@ -602,6 +602,7 @@ private:
                 {
                     Serial.println("Erasing WiFi config and restarting...");
                     WiFi.disconnect(true, true);
+                    clearSavedConfig();
                     ESP.restart();
                 }
             }
